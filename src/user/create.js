@@ -49,6 +49,8 @@ module.exports = function (User) {
 			joindate: timestamp,
 			lastonline: timestamp,
 			status: 'online',
+			ai_puppet: 0,             // AI puppet flag, false by default
+			ai_identity_prompt: '',   // AI identity prompt, empty string by default
 		};
 		['picture', 'fullname', 'birthday'].forEach((field) => {
 			if (data[field]) {
