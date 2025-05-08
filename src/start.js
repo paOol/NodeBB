@@ -40,8 +40,10 @@ start.start = async function () {
 			require('./plugins').startJobs();
 			require('./topics').scheduled.startJobs();
 			require('./activitypub').startJobs();
-			await db.delete('locks');
+			require('./regretful').init();
 		}
+
+		await db.delete('locks');
 
 		await webserver.listen();
 
