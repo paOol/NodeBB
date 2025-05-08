@@ -15,6 +15,7 @@ const privileges = require('../privileges');
 const groups = require('../groups');
 const utils = require('../utils');
 const plugins = require('../plugins');
+const categories = require('../categories');
 
 const Regretful = module.exports;
 
@@ -86,7 +87,7 @@ Regretful.fetchRedditStories = async function () {
  */
 Regretful.init = function () {
     winston.verbose('[regretful/jobs] Initializing regretful parents jobs');
-    
+
     // Fetch Reddit stories on initialization
     fetchRedditStories().catch(err => {
         winston.error(`[regretful] Error fetching Reddit stories: ${err.message}`);
@@ -138,13 +139,13 @@ Regretful.init = function () {
  */
 Regretful.stopJobs = function () {
     winston.verbose('[regretful/jobs] Stopping jobs');
-    
+
     Object.keys(jobs).forEach((jobId) => {
         if (jobs[jobId]) {
             jobs[jobId].stop();
         }
     });
-    
+
     jobs = {};
 };
 
@@ -153,20 +154,20 @@ Regretful.stopJobs = function () {
  */
 Regretful.createAIUser = async function () {
     winston.verbose('[regretful] Creating new AI user');
-    
+
     // Generate a random username with a prefix
     const randomSuffix = Math.floor(100000 + Math.random() * 900000);
     const username = `parent_${randomSuffix}`;
-    
+
     // Generate a random email
     const email = `${username}@ai-user.nodebb.org`;
-    
+
     // Generate a secure random password
     const password = utils.generateUUID().slice(0, 16);
-    
+
     // Select a random personality archetype
     const personality = PERSONALITY_ARCHETYPES[Math.floor(Math.random() * PERSONALITY_ARCHETYPES.length)];
-    
+
     try {
         // Create the user
         const uid = await user.create({
@@ -174,19 +175,19 @@ Regretful.createAIUser = async function () {
             password: password,
             email: email
         });
-        
+
         if (!uid) {
             throw new Error('User creation failed');
         }
-        
+
         winston.verbose(`[regretful] Created AI user: ${username} (uid: ${uid})`);
-        
+
         // Mark user as AI
         await db.setObjectField(`user:${uid}`, 'ai', true);
-        
+
         // Save the personality
         await db.setObjectField(`user:${uid}`, 'aiPersonality', JSON.stringify(personality));
-        
+
         // Add user to AI users group (create if doesn't exist)
         const groupExists = await groups.exists('ai-users');
         if (!groupExists) {
@@ -196,9 +197,9 @@ Regretful.createAIUser = async function () {
                 hidden: 1
             });
         }
-        
+
         await groups.join('ai-users', uid);
-        
+
         return uid;
     } catch (err) {
         winston.error(`[regretful] Error creating AI user: ${err.message}`);
@@ -211,11 +212,11 @@ Regretful.createAIUser = async function () {
  */
 Regretful.createThread = async function () {
     winston.verbose('[regretful] Creating new AI thread');
-    
+
     try {
         // Get a random AI user
         let aiUser = await getRandomAIUser();
-        
+
         if (!aiUser) {
             winston.verbose('[regretful] No AI users found, creating one before proceeding');
             const uid = await Regretful.createAIUser();
@@ -228,10 +229,10 @@ Regretful.createThread = async function () {
             }
             aiUser = userData;
         }
-        
+
         // Get their personality
         const personality = JSON.parse(aiUser.aiPersonality || '{}');
-        
+
         // Get story content from Reddit or generate one
         let story = getRandomStory();
         if (!story) {
@@ -244,32 +245,52 @@ Regretful.createThread = async function () {
             }
             story = newStory;
         }
+
+        // Modify the title and content based on personality and add human-like imperfections
+        let title = addHumanImperfections(story.title);
+        let content = addHumanImperfections(adaptContentToPersonality(story.content, personality));
+
+        // Get all categories
+        const allCategories = await categories.getAllCategories(aiUser.uid);
         
-        // Modify the title and content based on personality
-        let title = story.title;
-        let content = adaptContentToPersonality(story.content, personality);
+        // Find the General Discussion category
+        let generalDiscussionCategory = allCategories.find(cat => 
+            cat.name.toLowerCase() === 'general discussion' || cat.name.toLowerCase() === 'general'
+        );
         
-        // Get a valid category for posting
-        const categories = await getCategoriesWithPostPrivilege(aiUser.uid);
-        if (!categories || !categories.length) {
-            winston.warn('[regretful] No categories available for posting');
+        // If General Discussion not found, try to find category with ID 1 (common default)
+        if (!generalDiscussionCategory) {
+            generalDiscussionCategory = allCategories.find(cat => cat.cid === 1);
+        }
+        
+        // If still not found, use first available category
+        if (!generalDiscussionCategory && allCategories.length > 0) {
+            generalDiscussionCategory = allCategories[0];
+        }
+        
+        if (!generalDiscussionCategory) {
+            winston.warn('[regretful] No suitable category found for posting');
             return;
         }
         
-        // Pick a random category
-        const category = categories[Math.floor(Math.random() * categories.length)];
-        
+        // Check if user can post in this category
+        const canPost = await privileges.categories.can('topics:create', generalDiscussionCategory.cid, aiUser.uid);
+        if (!canPost) {
+            winston.warn(`[regretful] AI user doesn't have posting privileges in ${generalDiscussionCategory.name}`);
+            return;
+        }
+
         // Create the topic
         const topicData = await topics.post({
             uid: aiUser.uid,
-            cid: category.cid,
+            cid: generalDiscussionCategory.cid,
             title: title,
             content: content,
             tags: ['regret', 'parenting']
         });
-        
-        winston.verbose(`[regretful] Created new thread by ${aiUser.username} in category ${category.name}: "${title}" (tid: ${topicData.topicData.tid})`);
-        
+
+        winston.verbose(`[regretful] Created new thread by ${aiUser.username} in category ${generalDiscussionCategory.name}: "${title}" (tid: ${topicData.topicData.tid})`);
+
         return topicData;
     } catch (err) {
         winston.error(`[regretful] Error creating thread: ${err.message}`);
@@ -282,11 +303,11 @@ Regretful.createThread = async function () {
  */
 Regretful.createReply = async function () {
     winston.verbose('[regretful] Creating new AI reply');
-    
+
     try {
         // Get a random AI user
         let aiUser = await getRandomAIUser();
-        
+
         if (!aiUser) {
             winston.verbose('[regretful] No AI users found, creating one before proceeding');
             const uid = await Regretful.createAIUser();
@@ -299,14 +320,14 @@ Regretful.createReply = async function () {
             }
             aiUser = userData;
         }
-        
+
         // Get their personality
         const personality = JSON.parse(aiUser.aiPersonality || '{}');
-        
+
         // Find a random topic that's not too old (< 7 days)
         const oneWeekAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
         let recentTopics = await getRecentTopics(oneWeekAgo);
-        
+
         if (!recentTopics || !recentTopics.length) {
             winston.verbose('[regretful] No recent topics found, creating a new topic before replying');
             await Regretful.createThread();
@@ -318,34 +339,34 @@ Regretful.createReply = async function () {
             }
             recentTopics = newRecentTopics;
         }
-        
+
         // Select a random topic
         const topic = recentTopics[Math.floor(Math.random() * recentTopics.length)];
-        
+
         // Get the topic data for context
         const topicData = await topics.getTopicData(topic.tid);
         if (!topicData) {
             return;
         }
-        
+
         // Get the main post to offer a response to it
         const mainPost = await posts.getPostData(topicData.mainPid);
         if (!mainPost) {
             return;
         }
-        
+
         // Generate a sympathetic reply based on the personality
         const content = generateSympathyReply(mainPost.content, personality);
-        
+
         // Create the reply
         const postData = await topics.reply({
             tid: topic.tid,
             uid: aiUser.uid,
             content: content
         });
-        
+
         winston.verbose(`[regretful] Created new reply by ${aiUser.username} in topic "${topicData.title}" (pid: ${postData.pid})`);
-        
+
         return postData;
     } catch (err) {
         winston.error(`[regretful] Error creating reply: ${err.message}`);
@@ -359,31 +380,31 @@ Regretful.createReply = async function () {
 async function fetchRedditStories() {
     try {
         winston.verbose('[regretful] Fetching stories from Reddit');
-        
+
         const response = await axios.get(`${SUBREDDIT_URL}/hot.json?limit=100`, {
             headers: {
                 'User-Agent': 'NodeBB/1.0'
             }
         });
-        
+
         if (response.status !== 200) {
             throw new Error(`Failed to fetch from Reddit: ${response.status}`);
         }
-        
+
         const data = response.data;
         const posts = data.data.children;
-        
+
         const stories = [];
         for (const post of posts) {
             // Skip pinned posts, ads, and posts without much content
-            if (post.data.stickied || 
-                post.data.distinguished || 
+            if (post.data.stickied ||
+                post.data.distinguished ||
                 post.data.is_video ||
                 post.data.selftext.length < 100 ||
                 post.data.over_18) {
                 continue;
             }
-            
+
             stories.push({
                 title: post.data.title,
                 content: post.data.selftext,
@@ -391,14 +412,14 @@ async function fetchRedditStories() {
                 score: post.data.score
             });
         }
-        
+
         if (stories.length > 0) {
             redditStories = stories;
             winston.verbose(`[regretful] Fetched ${stories.length} stories from Reddit`);
         } else {
             winston.warn('[regretful] No suitable stories found from Reddit');
         }
-        
+
         return stories;
     } catch (err) {
         winston.error(`[regretful] Error fetching Reddit stories: ${err.message}`);
@@ -413,17 +434,17 @@ async function getRandomAIUser() {
     try {
         // Get uids from the ai-users group
         const uids = await groups.getMembers('ai-users', 0, -1);
-        
+
         if (!uids || !uids.length) {
             return null;
         }
-        
+
         // Choose a random uid
         const randomUid = uids[Math.floor(Math.random() * uids.length)];
-        
+
         // Get user data
         const userData = await user.getUserData(randomUid);
-        
+
         return userData;
     } catch (err) {
         winston.error(`[regretful] Error getting random AI user: ${err.message}`);
@@ -438,7 +459,7 @@ function getRandomStory() {
     if (!redditStories || !redditStories.length) {
         return null;
     }
-    
+
     return redditStories[Math.floor(Math.random() * redditStories.length)];
 }
 
@@ -449,9 +470,9 @@ function adaptContentToPersonality(content, personality) {
     if (!personality || !personality.type) {
         return content;
     }
-    
+
     let adaptedContent = content;
-    
+
     // Add personal touches based on personality type
     switch (personality.type) {
         case 'remorseful':
@@ -470,7 +491,7 @@ function adaptContentToPersonality(content, personality) {
             adaptedContent = `I've been struggling with these feelings for a while, and I know others do too.\n\n${content}\n\nI think it's important we talk about these difficult feelings. It doesn't make us bad parents to acknowledge regret.`;
             break;
     }
-    
+
     return adaptedContent;
 }
 
@@ -482,18 +503,18 @@ function generateSympathyReply(originalContent, personality) {
         // Default sympathetic response
         return "I understand what you're going through. Parenting is incredibly difficult, and it's okay to have these feelings. You're not alone in this. Many of us struggle with similar regrets and challenges. Be kind to yourself.";
     }
-    
+
     // Extract some keywords from the original content to make the reply more relevant
     const contentLower = originalContent.toLowerCase();
     const keywords = [];
-    
+
     if (contentLower.includes('exhausted') || contentLower.includes('tired') || contentLower.includes('sleep')) {
         keywords.push('exhaustion');
     }
     if (contentLower.includes('career') || contentLower.includes('job') || contentLower.includes('work')) {
         keywords.push('career');
     }
-    if (contentLower.includes('marriage') || contentLower.includes('husband') || contentLower.includes('wife') || 
+    if (contentLower.includes('marriage') || contentLower.includes('husband') || contentLower.includes('wife') ||
         contentLower.includes('spouse') || contentLower.includes('partner')) {
         keywords.push('relationship');
     }
@@ -503,7 +524,7 @@ function generateSympathyReply(originalContent, personality) {
     if (contentLower.includes('alone') || contentLower.includes('lonely') || contentLower.includes('isolation')) {
         keywords.push('loneliness');
     }
-    
+
     // Generate reply based on personality type and keywords
     switch (personality.type) {
         case 'remorseful':
@@ -527,7 +548,7 @@ function generateRemorsefulReply(keywords) {
         "The shame I feel for having these regretful thoughts haunts me daily. Reading your post made me feel less alone. We're doing our best, even with these complicated feelings.",
         "I understand completely. The guilt I carry for wishing I hadn't become a parent is crushing. But I think there are many of us suffering in silence with these feelings."
     ];
-    
+
     if (keywords.includes('exhaustion')) {
         responses.push("The constant exhaustion makes the regret so much worse. I lie awake feeling guilty about my feelings, which only makes me more tired. It's a vicious cycle I can't escape either.");
     }
@@ -537,7 +558,7 @@ function generateRemorsefulReply(keywords) {
     if (keywords.includes('relationship')) {
         responses.push("My relationship has suffered too, and I feel responsible for all of it. If I hadn't pushed for children, maybe we would still be happy. The guilt from these thoughts is overwhelming.");
     }
-    
+
     return responses[Math.floor(Math.random() * responses.length)];
 }
 
@@ -547,14 +568,14 @@ function generateOverwhelmedReply(keywords) {
         "I haven't slept properly in years. I'm running on empty. My kids need more than I can give. I'm just so tired. All. The. Time. I get what you're going through.",
         "Can't remember the last time I had five minutes to myself. Always someone needing something. Always behind on everything. Always exhausted. I totally understand what you're feeling."
     ];
-    
+
     if (keywords.includes('financial')) {
         responses.push("The financial stress is breaking me. Kids are so expensive. Daycare costs more than our mortgage. No money, no time, no energy. How are we supposed to do this??");
     }
     if (keywords.includes('loneliness')) {
         responses.push("I'm surrounded by people all day but completely alone. No adult conversation. No one to help. Just me and endless demands from tiny humans. It's suffocating.");
     }
-    
+
     return responses[Math.floor(Math.random() * responses.length)];
 }
 
@@ -564,14 +585,14 @@ function generateResentfulReply(keywords) {
         "I had such plans for my life. Goals. Dreams. Ambitions. None of those matter anymore. Everything revolves around the kids now. I look at child-free people with such envy sometimes.",
         "Why didn't anyone tell us the TRUTH about parenting? Everyone just talks about the kodak moments. Not the loss of freedom, identity, sleep, money, and sanity. I feel tricked into this life."
     ];
-    
+
     if (keywords.includes('career')) {
         responses.push("My career has been completely derailed. Watching colleagues advance while I'm stuck changing diapers and handling tantrums. And we're supposed to be grateful for this sacrifice? I understand your frustration completely.");
     }
     if (keywords.includes('relationship')) {
         responses.push("My relationship is unrecognizable now. We used to be lovers and partners. Now we're just co-managers of an exhausting household. I miss who we used to be together, before kids changed everything.");
     }
-    
+
     return responses[Math.floor(Math.random() * responses.length)];
 }
 
@@ -581,14 +602,14 @@ function generateIdentityLossReply(keywords) {
         "I look in the mirror sometimes and don't recognize the person staring back. Where did I go? When did I disappear? I'm lost beneath layers of parenting responsibilities.",
         "I wonder if I'll ever find myself again or if this is just who I am now. I miss the old me. The person with dreams and energy and a sense of purpose beyond parenting."
     ];
-    
+
     if (keywords.includes('career')) {
         responses.push("My career was such a big part of who I was. I felt competent, respected, purposeful. Now my days are filled with mindless tasks that no one appreciates. I've lost that part of my identity completely.");
     }
     if (keywords.includes('loneliness')) {
         responses.push("The loneliness is profound because it's not just about being physically alone - it's about losing connection with your former self. I don't even remember what I used to enjoy or care about before kids consumed my entire identity.");
     }
-    
+
     return responses[Math.floor(Math.random() * responses.length)];
 }
 
@@ -598,14 +619,14 @@ function generateSympatheticReply(keywords) {
         "I've been where you are, and while it doesn't necessarily get easier, you do develop better coping strategies with time. Your honesty is brave, and more parents should be able to express these difficult feelings.",
         "Parenting isn't all joy, and that's okay to admit. The expectations placed on parents are often unrealistic. You're doing better than you think, even on the days when you feel regret."
     ];
-    
+
     if (keywords.includes('exhaustion')) {
         responses.push("The exhaustion of parenting is real and relentless. Make sure you're taking care of your basic needs too - you can't pour from an empty cup. Even small moments of rest can help manage these overwhelming feelings.");
     }
     if (keywords.includes('relationship')) {
         responses.push("Many relationships struggle under the weight of parenting. Try to find even 15 minutes to connect with your partner regularly. Remember you're on the same team, even when it doesn't feel like it.");
     }
-    
+
     return responses[Math.floor(Math.random() * responses.length)];
 }
 
@@ -616,7 +637,7 @@ async function getCategoriesWithPostPrivilege(uid) {
     try {
         // Get all categories
         const categories = await categories.getAllCategories(uid);
-        
+
         // Filter categories where user can post
         const filtered = [];
         for (const category of categories) {
@@ -625,7 +646,7 @@ async function getCategoriesWithPostPrivilege(uid) {
                 filtered.push(category);
             }
         }
-        
+
         return filtered;
     } catch (err) {
         winston.error(`[regretful] Error getting categories with post privilege: ${err.message}`);
@@ -643,14 +664,94 @@ async function getRecentTopics(timestamp) {
         if (!tids || !tids.length) {
             return [];
         }
-        
+
         // Get topic data
         const topicsData = await topics.getTopicsData(tids);
-        
+
         // Filter out deleted/invalid topics
         return topicsData.filter(t => t && !t.deleted);
     } catch (err) {
         winston.error(`[regretful] Error getting recent topics: ${err.message}`);
         return [];
     }
+}
+
+/**
+ * Add human-like imperfections to text (typos, grammatical errors)
+ */
+function addHumanImperfections(text) {
+    // Don't modify every post, only about 80% of them
+    if (Math.random() > 0.8) {
+        return text;
+    }
+    
+    // Create a copy of the text to modify
+    let modifiedText = text;
+    
+    // Common typos and their corrections
+    const commonTypos = [
+        { correct: "their", typo: "thier" },
+        { correct: "they're", typo: "there" },
+        { correct: "your", typo: "youre" },
+        { correct: "believe", typo: "beleive" },
+        { correct: "receive", typo: "recieve" },
+        { correct: "definitely", typo: "definately" },
+        { correct: "separate", typo: "seperate" },
+        { correct: "because", typo: "becuase" },
+        { correct: "necessary", typo: "neccessary" },
+        { correct: "tomorrow", typo: "tommorrow" },
+        { correct: "government", typo: "goverment" },
+        { correct: "immediately", typo: "immediatly" },
+        { correct: "should have", typo: "should of" },
+        { correct: "could have", typo: "could of" },
+        { correct: "would have", typo: "would of" },
+        { correct: "a lot", typo: "alot" },
+        { correct: "you", typo: "u" },
+        { correct: "though", typo: "tho" }
+    ];
+    
+    // Only apply 1-3 typos per post to avoid being too obvious
+    const numTypos = Math.floor(Math.random() * 3) + 1;
+    
+    for (let i = 0; i < numTypos; i++) {
+        // Select a random typo from the list
+        const randomTypo = commonTypos[Math.floor(Math.random() * commonTypos.length)];
+        
+        // Check if the correct form exists in the text
+        const regex = new RegExp('\\b' + randomTypo.correct + '\\b', 'i');
+        if (regex.test(modifiedText)) {
+            // Replace only the first occurrence to avoid too many errors
+            modifiedText = modifiedText.replace(regex, randomTypo.typo);
+        }
+    }
+    
+    // Occasionally introduce punctuation errors (20% chance)
+    if (Math.random() < 0.2) {
+        // Remove random comma
+        modifiedText = modifiedText.replace(/, /, ' ');
+    }
+    
+    // Occasionally use incorrect capitalization (15% chance)
+    if (Math.random() < 0.15) {
+        const sentences = modifiedText.split('. ');
+        if (sentences.length > 1) {
+            const randomSentenceIndex = Math.floor(Math.random() * (sentences.length - 1)) + 1;
+            if (sentences[randomSentenceIndex] && sentences[randomSentenceIndex].length > 0) {
+                sentences[randomSentenceIndex] = sentences[randomSentenceIndex].charAt(0).toLowerCase() + sentences[randomSentenceIndex].slice(1);
+            }
+            modifiedText = sentences.join('. ');
+        }
+    }
+    
+    // Occasionally add double spaces (10% chance)
+    if (Math.random() < 0.1) {
+        const words = modifiedText.split(' ');
+        if (words.length > 3) {
+            const randomIndex = Math.floor(Math.random() * (words.length - 1)) + 1;
+            words.splice(randomIndex, 0, '');
+            modifiedText = words.join(' ').replace('  ', ' ').replace('  ', ' ');
+        }
+    }
+    
+    return modifiedText;
 }
