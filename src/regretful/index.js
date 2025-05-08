@@ -2,7 +2,7 @@
 
 const winston = require('winston');
 const cronJob = require('cron').CronJob;
-const fetch = require('node-fetch');
+const axios = require('axios'); // Using axios instead of node-fetch
 const cheerio = require('cheerio');
 const _ = require('lodash');
 
@@ -59,6 +59,27 @@ const PERSONALITY_ARCHETYPES = [
 
 // Storage for reddit stories to use
 let redditStories = [];
+
+/**
+ * Get the current jobs
+ */
+Regretful.getJobs = function () {
+    return jobs;
+};
+
+/**
+ * Get the number of available stories
+ */
+Regretful.getStoriesCount = function () {
+    return redditStories.length;
+};
+
+/**
+ * Expose the fetchRedditStories function to API
+ */
+Regretful.fetchRedditStories = async function () {
+    return await fetchRedditStories();
+};
 
 /**
  * Initialize jobs
@@ -193,7 +214,7 @@ Regretful.createThread = async function () {
     
     try {
         // Get a random AI user
-        const aiUser = await getRandomAIUser();
+        let aiUser = await getRandomAIUser();
         
         if (!aiUser) {
             winston.verbose('[regretful] No AI users found, creating one before proceeding');
@@ -212,7 +233,7 @@ Regretful.createThread = async function () {
         const personality = JSON.parse(aiUser.aiPersonality || '{}');
         
         // Get story content from Reddit or generate one
-        const story = getRandomStory();
+        let story = getRandomStory();
         if (!story) {
             winston.verbose('[regretful] No stories available, fetching stories before proceeding');
             await fetchRedditStories();
@@ -264,7 +285,7 @@ Regretful.createReply = async function () {
     
     try {
         // Get a random AI user
-        const aiUser = await getRandomAIUser();
+        let aiUser = await getRandomAIUser();
         
         if (!aiUser) {
             winston.verbose('[regretful] No AI users found, creating one before proceeding');
@@ -284,7 +305,7 @@ Regretful.createReply = async function () {
         
         // Find a random topic that's not too old (< 7 days)
         const oneWeekAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
-        const recentTopics = await getRecentTopics(oneWeekAgo);
+        let recentTopics = await getRecentTopics(oneWeekAgo);
         
         if (!recentTopics || !recentTopics.length) {
             winston.verbose('[regretful] No recent topics found, creating a new topic before replying');
@@ -339,17 +360,17 @@ async function fetchRedditStories() {
     try {
         winston.verbose('[regretful] Fetching stories from Reddit');
         
-        const response = await fetch(`${SUBREDDIT_URL}/hot.json?limit=100`, {
+        const response = await axios.get(`${SUBREDDIT_URL}/hot.json?limit=100`, {
             headers: {
                 'User-Agent': 'NodeBB/1.0'
             }
         });
         
-        if (!response.ok) {
+        if (response.status !== 200) {
             throw new Error(`Failed to fetch from Reddit: ${response.status}`);
         }
         
-        const data = await response.json();
+        const data = response.data;
         const posts = data.data.children;
         
         const stories = [];

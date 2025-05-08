@@ -24,6 +24,7 @@ const _mounts = {
 	feed: require('./feeds'),
 	'well-known': require('./well-known'),
 	activitypub: require('./activitypub'),
+	regretful: require('./regretful'), // Added regretful route
 };
 
 _mounts.main = (app, middleware, controllers) => {
@@ -155,6 +156,7 @@ function addCoreRoutes(app, router, middleware, mounts) {
 	_mounts.meta(router, middleware, controllers);
 	_mounts.api(router, middleware, controllers);
 	_mounts.feed(router, middleware, controllers);
+	_mounts.regretful(router, middleware, controllers);
 
 	_mounts.activitypub(router, middleware, controllers);
 	_mounts.main(router, middleware, controllers);
